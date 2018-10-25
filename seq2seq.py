@@ -40,43 +40,32 @@ class Seq2Seq(Model):
             num_oov_buckets=0,
             default_value=0)
 
+        index_to_string_table = tf.contrib.lookup.index_to_string_table_from_file(
+            vocabulary_file=self.config.vocab_list,
+            default_value="<UNK>")
+
         self.data_iterator = self.data.get_train_iterator(
             index_table) if self.mode == "train" else self.data.get_val_iterator(index_table)
 
         with tf.variable_scope("inputs"):
             # Placeholders for input, output
-            input_queries, input_replies, queries_lengths, replies_lengths = self.data_iterator.get_next()
-            self.input_queries = tf.placeholder_with_default(input_queries, [None, self.config.max_length],
-                                                             name="input_queries")
-            self.input_replies = tf.placeholder_with_default(input_replies, [None, self.config.max_length],
-                                                             name="input_replies")
-
-            self.queries_lengths = tf.placeholder_with_default(queries_lengths, [None], name="queries_length")
-            self.replies_lengths = tf.placeholder_with_default(replies_lengths, [None], name="replies_length")
-
+            batch = self.data_iterator.get_next()
+            self.encoder_inputs = tf.placeholder_with_default(batch["encoder_inputs"], [None, None],
+                                                             name="encoder_inputs")
+            self.decoder_inputs = tf.placeholder_with_default(batch["decoder_inputs"], [None, None],
+                                                             name="decoder_inputs")
+            self.decoder_outputs = tf.placeholder_with_default(batch["decoder_outputs"], [None, None],
+                                                             name="decoder_outputs")
+            self.encoder_lengths = tf.to_int32(tf.placeholder_with_default(tf.squeeze(batch["query_lengths"]), [None], name="encoder_lengths"))
+            self.decoder_lengths = tf.to_int32(tf.placeholder_with_default(tf.squeeze(batch["reply_lengths"]), [None], name="decoder_lengths"))
             self.dropout_keep_prob = tf.placeholder(tf.float32, name="dropout_keep_prob")
-
-
-        cur_batch_length = tf.shape(self.input_queries)[0]
-
-        # Define learning rate and optimizer
-        # learning_rate = tf.train.exponential_decay(self.config.learning_rate,
-        #                                            self.global_step_tensor,
-        #                                            decay_steps=50000,
-        #                                            decay_rate=0.96,
-        #                                            staircase=True)
-
+        
+        with tf.variable_scope("lengths"):
+            self.cur_batch_length = tf.shape(self.encoder_inputs)[0]
+            self.encoder_max_length = tf.shape(self.encoder_inputs)[1]
+            self.decoder_max_length = tf.shape(self.decoder_inputs)[1]
+            
         self.optimizer = tf.train.GradientDescentOptimizer(self.config.learning_rate)
-
-        # slice SOS_token and EOS_token
-        self.encoder_inputs = tf.slice(self.input_queries, [0, 1], [cur_batch_length, self.config.max_length-1])
-        self.encoder_lengths = self.queries_lengths - 2
-        self.decoder_inputs = tf.slice(self.input_replies, [0, 0], [cur_batch_length, self.config.max_length-1])
-        self.decoder_lengths = self.replies_lengths - 1
-        self.decoder_outputs = tf.slice(self.input_replies, [0, 1], [cur_batch_length, self.config.max_length])
-
-        # sequence mask to calculate loss without pad token
-        self.replies_mask = tf.sequence_mask(self.decoder_lengths, maxlen=self.config.max_length-1)
 
         # Embedding layer
         with tf.variable_scope("embedding"):
@@ -95,44 +84,55 @@ class Seq2Seq(Model):
         with tf.variable_scope("encoder") as vs:
             encoder_cell = tf.nn.rnn_cell.BasicLSTMCell(num_units=self.config.lstm_dim)
             encoder_outputs, encoder_state = tf.nn.dynamic_rnn(cell=encoder_cell,
-                                                                inputs=queries_embedded,
-                                                                sequence_length=self.encoder_lengths,
-                                                                time_major=False)
+                                                               inputs=queries_embedded,
+                                                               sequence_length=self.encoder_lengths, 
+                                                               dtype=tf.float32)
 
         with tf.variable_scope("decoder") as vs:
             decoder_cell = tf.nn.rnn_cell.BasicLSTMCell(num_units=self.config.lstm_dim)
             attention_mechanism = tf.contrib.seq2seq.BahdanauAttention(self.config.lstm_dim,
-                                                                       attention_states,
+                                                                       encoder_outputs,
                                                                        memory_sequence_length=self.encoder_lengths)
+            
             decoder_cell = tf.contrib.seq2seq.AttentionWrapper(decoder_cell,
                                                                attention_mechanism,
                                                                attention_layer_size=self.config.lstm_dim)
 
             # Helper
             helper = tf.contrib.seq2seq.TrainingHelper(replies_embedded, self.decoder_lengths, time_major=False)
-
+            
             # Decoder
+            projection_layer = tf.layers.Dense(90000, use_bias=False, name="output_projection")
             decoder = tf.contrib.seq2seq.BasicDecoder(decoder_cell,
                                                       helper,
-                                                      encoder_state,
+                                                      decoder_cell.zero_state(self.cur_batch_length, 
+                                                                              tf.float32).clone(cell_state=encoder_state),
                                                       output_layer=projection_layer)
+            self.outputs, _, _ = tf.contrib.seq2seq.dynamic_decode(decoder, output_time_major=False)
+            self.logits = self.outputs.rnn_output
+            generated_indices = tf.to_int64(self.outputs.sample_id)
 
-            outputs, _ = tf.contrib.seq2seq.dynamic_decode(decoder)
-            self.logits = outputs.rnn_output
-            self.translations = outputs.sample_id
+        with tf.variable_scope("generate_replies") as vs:
+            self.input_queries = index_to_string_table.lookup(self.encoder_inputs)
+            self.input_replies = index_to_string_table.lookup(self.decoder_outputs)
+            self.generated_replies = index_to_string_table.lookup(generated_indices)
 
         # Calculate mean cross-entropy loss
         with tf.variable_scope("loss"):
+            # sequence mask to calculate loss without pad token
+            self.replies_mask = tf.to_float(tf.sequence_mask(self.decoder_lengths, maxlen=self.decoder_max_length))
             losses = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=self.decoder_outputs, logits=self.logits)
-            self.loss = tf.reduce_sum(losses * self.replies_mask) / cur_batch_length
-            gvs = optimizer.compute_gradients(self.loss)
+            self.loss = tf.reduce_mean(losses * self.replies_mask)
+            gvs = self.optimizer.compute_gradients(self.loss)
             capped_gvs = [(tf.clip_by_value(grad, -1., 1.), var) for grad, var in gvs]
             self.train_step = self.optimizer.apply_gradients(capped_gvs, global_step=self.global_step_tensor)
 
     def val(self, sess, feed_dict=None):
-        loss = sess.run(self.loss, feed_dict=feed_dict)
-        # probs = sess.run(self.probs, feed_dict=feed_dict)
-        return loss, None, None
+        input_queries, input_replies, generated_replies, loss = sess.run([self.input_queries, 
+                                                                          self.input_replies, 
+                                                                          self.generated_replies, 
+                                                                          self.loss], feed_dict=feed_dict)
+        return input_queries, input_replies, generated_replies, loss
 
     def infer(self, sess, feed_dict=None):
         return sess.run(self.positive_probs, feed_dict=feed_dict)

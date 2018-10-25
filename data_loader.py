@@ -16,6 +16,12 @@ class DataGenerator:
         self.batch_size = config.batch_size
         self.shuffle = config.shuffle
         self.num_epochs = config.num_epochs
+        
+        self.pad_shapes = {"encoder_inputs": [None], 
+                           "decoder_inputs": [None], 
+                           "decoder_outputs": [None],
+                           "query_lengths": [None], 
+                           "reply_lengths": [None]}
             
     def get_train_iterator(self, index_table):
         train_files = [os.path.join(self.train_dir, fname) 
@@ -23,20 +29,25 @@ class DataGenerator:
                        if "validation" not in fname]
         
         train_set = tf.data.TextLineDataset(train_files)
-        train_set = train_set.map(lambda line: parse_single_line(line, index_table, self.max_length), num_parallel_calls=5000)
+        train_set = train_set.map(lambda line: parse_single_line(line, index_table), num_parallel_calls=8)
+        train_set = train_set.filter(lambda line: tf.shape(line["decoder_outputs"])[0]<20 & \
+                                                  tf.shape(line["encoder_inputs"][0]<20))
         train_set = train_set.shuffle(buffer_size=5000)
-        train_set = train_set.batch(self.batch_size)
+        train_set = train_set.padded_batch(self.batch_size, padded_shapes=self.pad_shapes)
+        train_set = train_set.prefetch(1)
         train_set = train_set.repeat(self.num_epochs)
-        
+
         train_iterator = train_set.make_initializable_iterator()
         return train_iterator
         
     def get_val_iterator(self, index_table):
         val_set = tf.data.TextLineDataset(self.val_dir)
-        val_set = val_set.map(lambda line: parse_single_line(line, index_table, self.max_length), num_parallel_calls=1000)
+        val_set = val_set.map(lambda line: parse_single_line(line, index_table), num_parallel_calls=8)
+        val_set = val_set.filter(lambda line: tf.shape(line["decoder_outputs"])[0]<20 & \
+                                              tf.shape(line["encoder_inputs"][0]<20))
         val_set = val_set.shuffle(buffer_size=5000)
-        val_set = val_set.batch(self.batch_size)
-
+        val_set = val_set.padded_batch(self.batch_size, padded_shapes=self.pad_shapes)
+        
         val_iterator = val_set.make_initializable_iterator()
         return val_iterator
             
@@ -63,19 +74,24 @@ def split_data(data):
     _, queries, replies = zip(*[line.split('\t') for line in data])
     return queries, replies
 
-def parse_single_line(line, index_table, max_length):
+def parse_single_line(line, index_table):
     """get single line from train set, and returns after padding and indexing
     :param line: corpus id \t query \t reply
     """
     splited = tf.string_split([line], delimiter="\t")
-    query = tf.concat([["<SOS>"], tf.string_split([splited.values[1]], delimiter=" ").values, ["<EOS>"]], axis=0)
-    reply = tf.concat([["<SOS>"], tf.string_split([splited.values[2]], delimiter=" ").values, ["<EOS>"]], axis=0)
+    encoder_input = tf.string_split([splited.values[1]], delimiter=" ").values
+    decoder_input = tf.concat([["<SOS>"], tf.string_split([splited.values[2]], delimiter=" ").values], axis=0)
+    decoder_output = tf.concat([tf.string_split([splited.values[2]], delimiter=" ").values, ["<EOS>"]], axis=0) 
     
-    paddings = tf.constant([[0, 0],[0, max_length]])
-    padded_query = tf.slice(tf.pad([query], paddings, constant_values="<PAD>"), [0, 0], [-1, max_length])
-    padded_reply = tf.slice(tf.pad([reply], paddings, constant_values="<PAD>"), [0, 0], [-1, max_length])
+    query_length = tf.expand_dims(tf.to_int64(tf.shape(encoder_input)[0]), -1)
+    reply_length = tf.expand_dims(tf.to_int64(tf.shape(decoder_input)[0]), -1)
     
-    indexed_query = tf.squeeze(index_table.lookup(padded_query))
-    indexed_reply = tf.squeeze(index_table.lookup(padded_reply))
+    encoder_input = index_table.lookup(encoder_input)
+    decoder_input = index_table.lookup(decoder_input)
+    decoder_output = index_table.lookup(decoder_output)
     
-    return indexed_query, indexed_reply, tf.shape(query)[0], tf.shape(reply)[0]
+    return {"encoder_inputs": encoder_input, 
+            "decoder_inputs": decoder_input, 
+            "decoder_outputs": decoder_output,
+            "query_lengths": query_length, 
+            "reply_lengths": reply_length}
