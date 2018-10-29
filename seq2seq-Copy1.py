@@ -65,16 +65,7 @@ class Seq2Seq(Model):
             self.encoder_max_length = tf.shape(self.encoder_inputs)[1]
             self.decoder_max_length = tf.shape(self.decoder_inputs)[1]
             
-        # learning rate and optimizer
-        learning_rate =  tf.train.exponential_decay(self.config.learning_rate,
-                                                    self.global_step_tensor,
-                                                    decay_steps=50000, decay_rate=0.96)
-        if self.config.optimizer == "adam":
-            self.optimizer = tf.train.AdamOptimizer(learning_rate)
-        elif self.config.optimizer == "sgd":
-            self.optimizer = tf.train.GradientDescentOptimizer(learning_rate)
-        else:
-            raise NotImplementedError()
+        self.optimizer = tf.train.GradientDescentOptimizer(self.config.learning_rate)
 
         # Embedding layer
         with tf.variable_scope("embedding"):
@@ -90,14 +81,15 @@ class Seq2Seq(Model):
                                                                                                 tf.float32)
 
         # encoding layer
-        with tf.variable_scope("encoder") as vs:
+        with tf.variable_scope("encoder"):
             encoder_cell = tf.nn.rnn_cell.BasicLSTMCell(num_units=self.config.lstm_dim)
             encoder_outputs, encoder_state = tf.nn.dynamic_rnn(cell=encoder_cell,
                                                                inputs=queries_embedded,
                                                                sequence_length=self.encoder_lengths, 
                                                                dtype=tf.float32)
-
-        with tf.variable_scope("decoder") as vs:
+        
+        # decoding layer
+        with tf.variable_scope("decoder"):
             decoder_cell = tf.nn.rnn_cell.BasicLSTMCell(num_units=self.config.lstm_dim)
             attention_mechanism = tf.contrib.seq2seq.BahdanauAttention(self.config.lstm_dim,
                                                                        encoder_outputs,
@@ -109,20 +101,23 @@ class Seq2Seq(Model):
 
             # Helper
             helper = tf.contrib.seq2seq.TrainingHelper(replies_embedded, self.decoder_lengths, time_major=False)
-            self.replies_embedded = replies_embedded
-            
+
             # Decoder
-            projection_layer = tf.layers.Dense(self.config.vocab_size, use_bias=False, name="output_projection")
             decoder = tf.contrib.seq2seq.BasicDecoder(decoder_cell,
                                                       helper,
                                                       decoder_cell.zero_state(self.cur_batch_length, 
-                                                                              tf.float32).clone(cell_state=encoder_state),
-                                                      output_layer=projection_layer)
-            self.outputs, _, _ = tf.contrib.seq2seq.dynamic_decode(decoder, output_time_major=False)
-            self.logits = self.outputs.rnn_output
-            self.logits = tf.concat([self.logits, tf.zeros([self.cur_batch_length, 
-                                                            self.config.max_length-tf.shape(self.logits)[1], 
-                                                            self.config.vocab_size])], axis=1)
+                                                                              tf.float32).clone(cell_state=encoder_state))
+            self.outputs, _, _ = tf.contrib.seq2seq.dynamic_decode(decoder,
+                                                                   output_time_major=False,
+                                                                   swap_memory=True)
+
+            # Output layer
+            self.output_layer = tf.layers.Dense(self.config.vocab_size, use_bias=False, name="output_projection")
+            self.logits = self.output_layer(self.outputs.rnn_output)
+
+            if self.config.num_sampled_softmax > 0:
+                self.logits = tf.no_op()
+
             generated_indices = tf.to_int64(self.outputs.sample_id)
 
         with tf.variable_scope("generate_replies") as vs:
@@ -134,8 +129,27 @@ class Seq2Seq(Model):
         with tf.variable_scope("loss"):
             # sequence mask to calculate loss without pad token
             self.replies_mask = tf.to_float(tf.sequence_mask(self.decoder_lengths, maxlen=self.config.max_length))
-            losses = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=self.decoder_outputs, logits=self.logits)
-            self.loss = tf.reduce_mean(losses * self.replies_mask)
+            
+            # use sampled softmax loss
+            if self.config.num_sampled_softmax > 0:
+                is_sequence = (self.outputs.rnn_output.shape.ndims == 3)
+
+                if is_sequence:
+                    labels = tf.reshape(self.decoder_outputs, [-1, 1])
+                    inputs = tf.reshape(self.outputs.rnn_output, [-1, self.config.lstm_dim])
+
+                losses = tf.nn.sampled_softmax_loss(weights=tf.transpose(self.output_layer.kernel),
+                                                    biases=self.output_layer.bias or tf.zeros([self.config.vocab_size]),
+                                                    labels=labels,
+                                                    inputs=inputs,
+                                                    num_sampled=self.config.num_sampled_softmax,
+                                                    num_classes=self.config.vocab_size,
+                                                    partition_strategy="div",
+                                                    seed=7)
+                if is_sequence:
+                    losses = tf.reshape(losses, [self.cur_batch_length, -1])
+
+            self.loss = tf.reduce_sum(losses) / tf.to_float(self.cur_batch_length)
             gvs = self.optimizer.compute_gradients(self.loss)
             capped_gvs = [(tf.clip_by_value(grad, -1., 1.), var) for grad, var in gvs]
             self.train_step = self.optimizer.apply_gradients(capped_gvs, global_step=self.global_step_tensor)
@@ -149,3 +163,5 @@ class Seq2Seq(Model):
 
     def infer(self, sess, feed_dict=None):
         return sess.run(self.positive_probs, feed_dict=feed_dict)
+
+    

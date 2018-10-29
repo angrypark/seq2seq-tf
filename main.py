@@ -26,19 +26,19 @@ args.add_argument("--name", type=str, default="start")
 args.add_argument("--config", type=str, default="")
 
 # Data loading and saving parameters
-args.add_argument("--train_dir", type=str, default="/media/scatter/scatterdisk/reply_matching_model/sol.tokenized.sent_piece_100K/")
-args.add_argument("--val_dir", type=str, default="/media/scatter/scatterdisk/reply_matching_model/sol.tokenized.sent_piece_100K/sol.validation.txt")
-args.add_argument("--pretrained_embed_dir", type=str, default="/media/scatter/scatterdisk/pretrained_embedding/fasttext.sent_piece_100K.256D")
+args.add_argument("--train_dir", type=str, default="/media/scatter/scatterdisk/reply_matching_model/sol.tokenized.sent_piece_50K/")
+args.add_argument("--val_dir", type=str, default="/media/scatter/scatterdisk/reply_matching_model/sol.tokenized.sent_piece_50K/sol.validation.txt")
+args.add_argument("--pretrained_embed_dir", type=str, default="/media/scatter/scatterdisk/pretrained_embedding/fasttext.sent_piece_50K.256D")
 args.add_argument("--checkpoint_dir", type=str, default="/media/scatter/scatterdisk/reply_matching_model/runs/")
 
 # Model specification
-args.add_argument("--model", type=str, default="DualEncoderLSTM")
-args.add_argument("--sent_piece_model", type=str, default="/media/scatter/scatterdisk/tokenizer/sent_piece.100K.model")
+args.add_argument("--model", type=str, default="Seq2Seq")
+args.add_argument("--sent_piece_model", type=str, default="/media/scatter/scatterdisk/tokenizer/sent_piece.50K.model")
 args.add_argument("--soynlp_scores", type=str, default="/media/scatter/scatterdisk/tokenizer/soynlp_scores.sol.100M.txt")
 args.add_argument("--normalizer", type=str, default="DummyNormalizer")
 args.add_argument("--tokenizer", type=str, default="DummyTokenizer")
-args.add_argument("--vocab_size", type=int, default=90000)
-args.add_argument("--vocab_list", type=str, default="/media/scatter/scatterdisk/pretrained_embedding/vocab_list.sent_piece_100K.txt")
+args.add_argument("--vocab_size", type=int, default=48000)
+args.add_argument("--vocab_list", type=str, default="/media/scatter/scatterdisk/pretrained_embedding/vocab_list.sent_piece_50K.txt")
 
 # Model hyperparameters
 args.add_argument("--embed_dim", type=int, default=256)
@@ -46,7 +46,10 @@ args.add_argument("--embed_dropout_keep_prob", type=float, default=0.9)
 args.add_argument("--learning_rate", type=float, default=1e-3)
 args.add_argument("--min_length", type=int, default=1)
 args.add_argument("--max_length", type=int, default=20)
-args.add_argument("--lstm_dropout_keep_prob", type=float, default=0.9)
+args.add_argument("--dropout_keep_prob", type=float, default=0.9)
+
+# Loss hyperparameters
+args.add_argument("--num_sampled_softmax" , type=int, default=0)
 
 # Model : DualEncoderLSTM
 args.add_argument("--lstm_dim", type=int, default=512)
@@ -56,6 +59,7 @@ args.add_argument("--evaluate_every", type=int, default=20000)
 args.add_argument("--save_every", type=int, default=20000)
 args.add_argument("--max_to_keep", type=int, default=5)
 args.add_argument("--shuffle", type=bool, default=True)
+args.add_argument("--optimizer", type=str, default="adam")
 
 def main():
     config = args.parse_args()
@@ -88,7 +92,6 @@ def main():
 
     # here you train your model
     trainer.train()
-
 
 if __name__ == '__main__':
     main()
